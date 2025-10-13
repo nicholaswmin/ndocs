@@ -18,6 +18,17 @@ process.title = pkg.name
 const COLORS_ENABLED = !('NO_COLOR' in process.env)
 const color = (name, text) => COLORS_ENABLED ? style(name, text) : String(text)
 
+// Uniform logging and errors
+const PREFIX = `[${pkg.name}]`
+const normalize = v => String(v ?? '').replace(/\s+/g, ' ').trim()
+const logInfo = msg => console.warn(color('cyan', asLoading(normalize(msg))))
+const logError = msg => console.error(color('red', `${PREFIX} ${normalize(msg)}`))
+const fail = (err, code = 1) => {
+  const msg = err && err.message ? err.message : err
+  logError(msg)
+  process.exit(code)
+}
+
 const { values, positionals } = parseArgs({
   args: process.argv.slice(2),
   options: {
@@ -62,8 +73,8 @@ const base = values.nodev === 'latest'
 
 const url = module => `${base}/${module}.json`
 
-const asLoading = text => `${text.replace(/\s+/g, ' ').trim()}...`
-const spinner = (text = 'loading') => console.warn(color('cyan', asLoading(text)))
+const asLoading = text => `${String(text).replace(/\s+/g, ' ').trim()}...`
+const spinner = (text = 'loading') => logInfo(text)
 
 const parseSpec = spec => spec.includes('.') ? spec.split('.') : [spec]
 
@@ -221,8 +232,7 @@ export { fetch as fetchDoc }
 // Run CLI only when executed directly
 if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   if (values.nodev !== 'latest' && !/^\d+$/.test(values.nodev)) {
-    console.error(`Invalid Node version: ${values.nodev}`)
-    process.exit(1)
+    fail(`Invalid Node version: ${values.nodev}`)
   }
 
   if (values.help || !positionals.length) {
@@ -233,16 +243,16 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   if (positionals[0] === 'list') {
     list()
       .then(modules => console.log(modules.join('\n')))
-      .catch(err => (console.error(err.message), process.exit(1)))
+      .catch(fail)
   } else if (positionals[0] === 'completion') {
     list()
       .then(modules => console.log(completion(modules)))
-      .catch(err => (console.error(err.message), process.exit(1)))
+      .catch(fail)
   } else if (values.stats) {
     showStats(positionals)
-      .catch(err => (console.error(err.message), process.exit(1)))
+      .catch(fail)
   } else {
     fetchModules(positionals)
-      .catch(err => (console.error(err.message), process.exit(1)))
+      .catch(fail)
   }
 }
