@@ -1,0 +1,38 @@
+{
+  "name": "ndocs",
+  "version": "1.0.0",
+  "description": "skim node docs, expand as needed",
+  "sideEffects": false,
+  "files": [
+    "ndocs.js",
+    "README.md"
+  ],
+  "type": "module",
+  "bin": {
+    "ndocs": "./ndocs.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+
+  "keywords": [
+    "nodejs",
+    "docs",
+    "documentation",
+    "cli",
+    "api"
+  ],
+  "author": "nicholaswmin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nicholaswmin/ndocs"
+  },
+  "homepage": "https://github.com/nicholaswmin/ndocs#readme",
+  "bugs": {
+    "url": "https://github.com/nicholaswmin/ndocs/issues"
+  }
+}

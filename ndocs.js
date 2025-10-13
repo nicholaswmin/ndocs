@@ -1,35 +1,29 @@
 #!/usr/bin/env node
-
 /*
 ndocs - skim node API docs, expand as needed
-
-DEV:
-  npm link      # link globally in dev
-  npm unlink    # unlink globally
 */
 
-import { parseArgs, styleText as style } from 'node:util'
+import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { parseArgs as args, styleText as style } from 'node:util'
 import pkg from './package.json' with { type: 'json' }
 
 process.title = pkg.name
 
-// Honor NO_COLOR per https://no-color.org
-const COLORS_ENABLED = !('NO_COLOR' in process.env)
-const color = (name, text) => COLORS_ENABLED ? style(name, text) : String(text)
+const TIMEOUT = 10_000
 
-// Uniform logging and errors
-const PREFIX = `[${pkg.name}]`
+const color = (name, text) => style(name, text)
+
 const normalize = v => String(v ?? '').replace(/\s+/g, ' ').trim()
-const logInfo = msg => console.warn(color('cyan', asLoading(normalize(msg))))
-const logError = msg => console.error(color('red', `${PREFIX} ${normalize(msg)}`))
-const fail = (err, code = 1) => {
-  const msg = err && err.message ? err.message : err
-  logError(msg)
-  process.exit(code)
+const log = {
+  error: msg => console.error(`${color('red', 'x')} ${normalize(msg)}`),
+  spin: () => console.warn(color('dim', '...'))
 }
 
-const { values, positionals } = parseArgs({
+const fail = (err, code = 1) =>
+  (log.error(err?.message ?? err), process.exit(code))
+
+const { values, positionals } = args({
   args: process.argv.slice(2),
   options: {
     nodev: { type: 'string',  short: 'n', default: 'latest' },
@@ -42,162 +36,147 @@ const { values, positionals } = parseArgs({
 
 const usage = () =>
 `
-${color('cyan', 'ndocs - skim node docs, expand as needed')}\n\n` +
-   color('dim', `
-USAGE: ndocs <module[.method]> [...]
+${color('cyan', 'Node.js Documentation')}\n` +
+color('dim', `
+LLM-friendly doc viewer; fetch only what you want.
 
-EXAMPLES:
-  ndocs list                        # list all available modules
-  ndocs completion                  # generate zsh completion script
-  ndocs assert                      # concise "assert" module docs
-  ndocs assert.strictEqual          # specific method only
-  ndocs assert.ok assert.fail       # multiple methods
-  ndocs assert --full               # full docs of same module
-  ndocs assert -n 22                # docs for Node v22
-  ndocs assert --stats              # size comparison
+USAGE
+  ndocs <module[.method]> [...]
 
-OPTIONS:
-  --nodev/-n    # node version (default: latest)
-  --full/-f     # return all fields
-  --stats/-s    # show size stats
-  --help/-h     # show this help
+EXAMPLES
+  ndocs list
+  ndocs completion
+  ndocs assert
+  ndocs assert.strictEqual
+  ndocs assert.ok assert.fail
+  ndocs assert --full
+  ndocs assert -n 22
+  ndocs assert --stats
 
-ENV:
-  NO_COLOR      # No ANSI output
+OPTIONS
+  --nodev/-n    node version (default: latest)
+  --full/-f     return all fields
+  --stats/-s    show size stats
+  --help/-h     show this help
 
-.`.trim())
+ENV
+  NO_COLOR
+`.trim())
 
 const base = values.nodev === 'latest'
   ? 'https://nodejs.org/api'
   : `https://nodejs.org/docs/latest-v${values.nodev}.x/api`
 
-const url = module => `${base}/${module}.json`
+const SAFE_MOD = /^[a-z0-9._-]+$/i
+const sanitizeModule = m =>
+  SAFE_MOD.test(m) ? m : (() => { throw new Error(`invalid module: ${m}`) })()
 
-const asLoading = text => `${String(text).replace(/\s+/g, ' ').trim()}...`
-const spinner = (text = 'loading') => logInfo(text)
+const url = m => `${base}/${sanitizeModule(m)}.json`
 
-const parseSpec = spec => spec.includes('.') ? spec.split('.') : [spec]
-
-const fetchWithTimeout = (url, timeout = 10000) => {
-  const ctrl = new AbortController()
-  const id = setTimeout(() => ctrl.abort(), timeout)
-
-  return globalThis.fetch(url, { signal: ctrl.signal })
-    .finally(() => clearTimeout(id))
+const parse = spec => {
+  const [mod, ...rest] = String(spec).split('.')
+  return [mod, rest.length ? rest.join('.') : undefined]
 }
 
-const extract = (data, full = false) => {
-  if (full) return data
+const fetch = async (u, timeout = TIMEOUT) => {
+  const signal = AbortSignal.timeout(timeout)
+  const res = await globalThis.fetch(u, { signal })
+  if (!res.ok) throw new Error(`failed: ${res.status}`)
+  return res
+}
 
-  const module = data.modules?.[0] || {}
+const stripHtml = s =>
+  s?.replace(/<pre><code[^>]*>/g, '\n```\n')
+    .replace(/<\/code><\/pre>/g, '\n```\n')
+    .replace(/<p>/g, '\n')
+    .replace(/<\/p>/g, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  ?? ''
+const uniqSort = xs => [...new Set(xs)].sort()
+
+const extract = (d, full = false) => {
+  if (full) return d
+
+  const m = d.modules?.[0] ?? {}
   return {
-    name: module.name,
-    stability: module.stability,
-    stabilityText: module.stabilityText,
-    desc: module.desc?.replace(/<[^>]*>/g, '').slice(0, 500)
+    name: m.name,
+    stability: m.stability,
+    stabilityText: m.stabilityText,
+    desc: stripHtml(m.desc).slice(0, 500)
   }
 }
 
 const list = async () => {
-  const ver = values.nodev === 'latest' ? '' : ` v${values.nodev}`
-  spinner(`fetching modules:${ver}`)
+  log.spin()
 
-  // Prefer JSON index (all.json) for stability; fallback to HTML scrape
-  const baseApi = values.nodev === 'latest'
-    ? 'https://nodejs.org/api'
-    : `https://nodejs.org/docs/latest-v${values.nodev}.x/api`
+  const fromJson = () =>
+    fetch(`${base}/all.json`)
+      .then(r => r.json())
+      .then(j => j.modules ?? [])
+      .then(ms => ms.map(m => m.name).filter(Boolean))
+      .then(uniqSort)
 
-  // Try JSON first
-  try {
-    const resJson = await fetchWithTimeout(`${baseApi}/all.json`)
-    if (resJson.ok) {
-      const json = await resJson.json()
-      const names = (json.modules || []).map(m => m.name).filter(Boolean)
-      if (names.length) return [...new Set(names)].sort()
-    }
-  } catch (_) {
-    // ignore and fallback to HTML
-  }
+  const fromHtml = () =>
+    fetch(`${base}/`)
+      .then(r => r.text())
+      .then(h => [...h.matchAll(/href="([^"]+)\.html"/g)]
+        .map(m => m[1])
+        .filter(n => !n.includes('/') && n !== 'index' && n !== 'all'))
+      .then(uniqSort)
 
-  // HTML fallback
-  const res = await fetchWithTimeout(`${baseApi}/`)
-  if (!res.ok) throw new Error(`Failed: ${res.status}`)
-
-  const html = await res.text()
-  const matches = html.matchAll(/href="([^"]+)\.html"/g)
-
-  return [...new Set([...matches].map(m => m[1]).filter(name =>
-    !name.includes('/') && name !== 'index' && name !== 'all'
-  ))].sort()
+  return fromJson().catch(fromHtml)
 }
 
-const findMethod = (data, methodName) => {
-  const search = obj => {
-    if (obj.name === methodName || obj.textRaw?.includes(methodName))
-      return obj
+const find = (data, name) => {
+  if (!name) return null
+  const keys = ['methods', 'classes', 'events', 'properties', 'modules']
+  const last = name.split('.').pop()
 
-    const methodMatch = obj.methods?.find(m =>
-      m.name === methodName || m.textRaw?.includes(methodName)
-    )
-    if (methodMatch) return methodMatch
+  const match = o =>
+    o?.name === name || o?.name === last ||
+    o?.textRaw?.includes(name) || o?.textRaw?.includes(last)
 
-    return obj.modules?.reduce(
-      (found, mod) => found || search(mod), null
-    ) || null
-  }
+  const kids = o => keys.flatMap(k => Array.isArray(o?.[k]) ? o[k] : [])
 
-  return search(data)
+  const loop = nodes =>
+    nodes.length
+      ? (match(nodes[0]) ? nodes[0] : loop([...kids(nodes[0]), ...nodes.slice(1)]))
+      : null
+
+  return loop([data])
 }
 
-const fetch = async (mod, method, full = false) => {
-  const link = url(mod)
-  spinner(`fetching: ${link}`)
+const getDoc = (mod, method, full = false) =>
+  fetch(url(mod))
+    .then(r => r.json())
+    .then(d => method
+      ? (() => {
+          const hit = find(d, method)
+          if (!hit) throw new Error(`not found: ${method} in ${mod}`)
+          return hit
+        })()
+      : extract(d, full))
 
-  const res = await fetchWithTimeout(link)
-  if (!res.ok) throw new Error(`Failed: ${res.status}`)
-
-  const data = await res.json()
-
-  if (method) {
-    const found = findMethod(data, method)
-    if (!found) throw new Error(`Method '${method}' not found in '${mod}'`)
-
-    return found
-  }
-
-  return extract(data, full)
-}
-
-const fetchModules = specs =>
-  Promise.all(specs.map(spec => {
-    const [mod, method] = parseSpec(spec)
-    return fetch(mod, method, values.full)
+const load = specs =>
+  (log.spin(), Promise.all(specs.map(s => {
+    const [mod, method] = parse(s)
+    return getDoc(mod, method, values.full)
   }))
-    .then(results => console.log(JSON.stringify(results, null, 2)))
+  .then(xs => console.log(JSON.stringify(xs, null, 2))))
 
-const showStats = async specs => {
-  const results = await Promise.all(specs.map(async spec => {
-    const [mod] = parseSpec(spec)
-    const link = url(mod)
-    spinner(`fetching: ${link}`)
-
-    const res = await fetchWithTimeout(link)
-    if (!res.ok) throw new Error(`Failed: ${res.status}`)
-
-    const data = await res.json()
-
-    const fullDoc = extract(data, true)
-    const summaryDoc = extract(data, false)
-
-    const full = JSON.stringify(fullDoc).length
-    const summary = JSON.stringify(summaryDoc).length
+const showStats = specs =>
+  Promise.all(specs.map(async s => {
+    const [mod] = parse(s)
+    log.spin()
+    const data = await fetch(url(mod)).then(r => r.json())
+    const full = Buffer.byteLength(JSON.stringify(extract(data, true)))
+    const summary = Buffer.byteLength(JSON.stringify(extract(data, false)))
     const saved = `${((1 - summary / full) * 100).toFixed(2)}%`
-
     return { module: mod, full, summary, saved }
   }))
-
-  console.table(results)
-}
+  .then(rows => console.table(rows))
 
 const completion = modules => `
 #compdef ndocs
@@ -223,36 +202,34 @@ _ndocs() {
 _ndocs
 `.trim()
 
-// Export internals for tests
-export { parseSpec, extract, findMethod }
-export const __internals = { url, fetchWithTimeout, asLoading }
-// Export the networked fetch helper for tests, with a safe alias
-export { fetch as fetchDoc }
+export { extract, find, parse, getDoc }
+export const internals = { url, fetch, sanitizeModule }
 
-// Run CLI only when executed directly
-if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
-  if (values.nodev !== 'latest' && !/^\d+$/.test(values.nodev)) {
-    fail(`Invalid Node version: ${values.nodev}`)
+const isCLI = (() => {
+  try {
+    const argv1 = process.argv[1] || ''
+    return realpathSync(argv1) ===
+      realpathSync(fileURLToPath(import.meta.url))
+  } catch (_) {
+    return false
   }
+})()
+
+if (isCLI) {
+  if (values.nodev !== 'latest' && !/^\d+$/.test(values.nodev))
+    fail(`invalid node version: ${values.nodev}`)
 
   if (values.help || !positionals.length) {
     console.warn(usage())
     process.exit(values.help ? 0 : 1)
   }
 
-  if (positionals[0] === 'list') {
-    list()
-      .then(modules => console.log(modules.join('\n')))
-      .catch(fail)
-  } else if (positionals[0] === 'completion') {
-    list()
-      .then(modules => console.log(completion(modules)))
-      .catch(fail)
-  } else if (values.stats) {
-    showStats(positionals)
-      .catch(fail)
-  } else {
-    fetchModules(positionals)
-      .catch(fail)
-  }
+  if (positionals[0] === 'list')
+    list().then(xs => console.log(xs.join('\n'))).catch(fail)
+  else if (positionals[0] === 'completion')
+    list().then(xs => console.log(completion(xs))).catch(fail)
+  else if (values.stats)
+    showStats(positionals).catch(fail)
+  else
+    load(positionals).catch(fail)
 }

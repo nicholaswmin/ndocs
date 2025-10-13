@@ -1,0 +1,16 @@
+# nodejs
+node_modules/
+npm-debug.log
+*.log
+
+# macos
+.DS_Store
+
+# editors
+.zed/
+.vscode/
+
+# assistants
+CLAUDE.md
+AGENTS.md
+.claude/

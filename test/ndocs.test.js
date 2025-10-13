@@ -1,30 +1,33 @@
-import { test } from 'node:test'
 import { spawn } from 'node:child_process'
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { resolve, dirname } from 'node:path'
+import { stripVTControlCharacters as strip } from 'node:util'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
-const ndocsPath = resolve(__dirname, '..', 'ndocs.js')
+const binpath = resolve(__dirname, '..', 'ndocs.js')
 
-await test('#parseSpec', async t => {
+await test('#parse', async t => {
   t.beforeEach(async t => {
-    const mod = await import(ndocsPath)
-    t.parseSpec = mod.parseSpec
+    const mod = await import(binpath)
+    t.parse = mod.parse
   })
 
   await t.test('module only', t => {
-    t.assert.deepStrictEqual(t.parseSpec('fs'), ['fs'])
+    t.assert.deepStrictEqual(t.parse('fs'), ['fs', undefined])
   })
 
   await t.test('module + method', t => {
-    t.assert.deepStrictEqual(t.parseSpec('fs.readFile'), ['fs', 'readFile'])
+    t.assert.deepStrictEqual(t.parse('fs.readFile'), ['fs', 'readFile'])
   })
 })
 
 await test('#extract', async t => {
   t.beforeEach(async t => {
-    const mod = await import(ndocsPath)
+    const mod = await import(binpath)
     t.extract = mod.extract
     t.data = {
       modules: [{
@@ -51,10 +54,10 @@ await test('#extract', async t => {
   })
 })
 
-await test('#findMethod', async t => {
+await test('#find', async t => {
   t.beforeEach(async t => {
-    const mod = await import(ndocsPath)
-    t.findMethod = mod.findMethod
+    const mod = await import(binpath)
+    t.find = mod.find
     t.doc = {
       modules: [{
         name: 'assert',
@@ -67,20 +70,20 @@ await test('#findMethod', async t => {
   })
 
   await t.test('finds nested method', t => {
-    const found = t.findMethod(t.doc, 'strictEqual')
+    const found = t.find(t.doc, 'strictEqual')
     t.assert.strictEqual(found?.name, 'strictEqual')
   })
 
   await t.test('returns null when missing', t => {
-    const found = t.findMethod(t.doc, 'doesNotExist')
+    const found = t.find(t.doc, 'doesNotExist')
     t.assert.strictEqual(found, null)
   })
 })
 
-await test('__internals', async t => {
+await test('internals', async t => {
   t.beforeEach(async t => {
-    const mod = await import(ndocsPath)
-    t.internals = mod.__internals
+    const mod = await import(binpath)
+    t.internals = mod.internals
     t.originalFetch = globalThis.fetch
   })
 
@@ -93,22 +96,22 @@ await test('__internals', async t => {
     t.assert.strictEqual(u, 'https://nodejs.org/api/assert.json')
   })
 
-  await t.test('fetchWithTimeout passes AbortSignal', async t => {
+  await t.test('fetch passes AbortSignal', async t => {
     const fn = t.mock.fn(() => Promise.resolve({ ok: true }))
     globalThis.fetch = fn
 
-    const p = t.internals.fetchWithTimeout('https://example.com', 5)
+    const p = t.internals.fetch('https://example.com', 5)
     t.assert.ok(p && typeof p.then === 'function')
     await p
     t.assert.strictEqual(fn.mock.calls.length, 1)
     const [, options] = fn.mock.calls[0].arguments
-    t.assert.ok(options && options.signal && typeof options.signal.aborted === 'boolean')
+    t.assert.ok(options && options.signal, 'AbortSignal passed')
   })
 })
 
 await test('CLI completion generates zsh script', async t => {
   const { code, stdout } = await new Promise(resolve => {
-    const p = spawn(process.execPath, [ndocsPath, 'completion'], {
+    const p = spawn(process.execPath, [binpath, 'completion'], {
       env: { ...process.env, NO_COLOR: '1' }
     })
     let stdout = ''
@@ -125,7 +128,7 @@ await test('CLI completion generates zsh script', async t => {
 
 await test('CLI --help prints usage and exits 0', async t => {
   const { code, stderr } = await new Promise(resolve => {
-    const p = spawn(process.execPath, [ndocsPath, '--help'], {
+    const p = spawn(process.execPath, [binpath, '--help'], {
       env: { ...process.env, NO_COLOR: '1' }
     })
     let stderr = ''
@@ -134,12 +137,12 @@ await test('CLI --help prints usage and exits 0', async t => {
   })
 
   t.assert.strictEqual(code, 0)
-  t.assert.match(stderr, /USAGE: ndocs/i)
+  t.assert.match(stderr, /USAGE\s+ndocs/i)
 })
 
 await test('CLI --help honors NO_COLOR (no ANSI)', async t => {
   const { code, stderr } = await new Promise(resolve => {
-    const p = spawn(process.execPath, [ndocsPath, '--help'], {
+    const p = spawn(process.execPath, [binpath, '--help'], {
       env: { ...process.env, NO_COLOR: '1' }
     })
     let stderr = ''
@@ -148,12 +151,12 @@ await test('CLI --help honors NO_COLOR (no ANSI)', async t => {
   })
 
   t.assert.strictEqual(code, 0)
-  t.assert.ok(!/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/.test(stderr), 'should not include ANSI escapes')
+  t.assert.strictEqual(strip(stderr), stderr, 'should not include ANSI escapes')
 })
 
 await test('CLI invalid version prints uniform error', async t => {
   const { code, stderr } = await new Promise(resolve => {
-    const p = spawn(process.execPath, [ndocsPath, 'assert', '-n', 'banana'], {
+    const p = spawn(process.execPath, [binpath, 'assert', '-n', 'banana'], {
       env: { ...process.env, NO_COLOR: '1' }
     })
     let stderr = ''
@@ -162,12 +165,37 @@ await test('CLI invalid version prints uniform error', async t => {
   })
 
   t.assert.strictEqual(code, 1)
-  t.assert.match(stderr, /\[ndocs\] Invalid Node version: banana/)
+  t.assert.match(stderr, /x invalid node version: banana/i)
+})
+
+await test('CLI works when invoked via symlink', async t => {
+  if (process.platform === 'win32')
+    return t.skip('symlinks flaky on Windows without admin')
+
+  const tmp = mkdtempSync(join(tmpdir(), 'ndocs-'))
+  const link = join(tmp, 'ndocs-link.js')
+  symlinkSync(binpath, link)
+
+  const { code, stderr } = await new Promise(resolve => {
+    const p = spawn(process.execPath, [link, '--help'], {
+      env: { ...process.env, NO_COLOR: '1' }
+    })
+    let stderr = ''
+    p.stderr.on('data', d => (stderr += d.toString()))
+    p.on('close', code => resolve({ code, stderr }))
+  })
+
+  try {
+    t.assert.strictEqual(code, 0)
+    t.assert.match(stderr, /USAGE\s+ndocs/i)
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
 })
 
 await test('CLI list returns module names', async t => {
   const { code, stdout } = await new Promise(resolve => {
-    const p = spawn(process.execPath, [ndocsPath, 'list'], {
+    const p = spawn(process.execPath, [binpath, 'list'], {
       env: { ...process.env, NO_COLOR: '1' }
     })
     let stdout = ''
@@ -183,10 +211,10 @@ await test('CLI list returns module names', async t => {
   t.assert.ok(lines.includes('path'), 'should include path')
 })
 
-await test('#fetchDoc', async t => {
+await test('#getDoc (API wrapper)', async t => {
   t.beforeEach(async t => {
-    const mod = await import(ndocsPath)
-    t.fetchDoc = mod.fetchDoc
+    const mod = await import(binpath)
+    t.fetchDoc = mod.getDoc
     t.originalFetch = globalThis.fetch
   })
 
@@ -220,7 +248,7 @@ await test('#fetchDoc', async t => {
 
     await t.assert.rejects(
       () => t.fetchDoc('nonexistent', null, false),
-      { message: /Failed: 404/ }
+      { message: /failed:\s*404/i }
     )
   })
 
@@ -237,7 +265,7 @@ await test('#fetchDoc', async t => {
 
     await t.assert.rejects(
       () => t.fetchDoc('assert', 'nonexistent', false),
-      { message: /Method 'nonexistent' not found/ }
+      { message: /not found:\s*nonexistent\s*in\s*assert/i }
     )
   })
 })
