@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --use-env-proxy
 /*
 ndocs - skim node API docs, expand as needed
 */
