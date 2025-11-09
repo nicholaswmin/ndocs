@@ -10,6 +10,17 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const binpath = resolve(__dirname, '..', 'ndocs.js')
 
+const hasNetwork = async () => {
+  try {
+    await fetch('https://nodejs.org/api/all.json', {
+      signal: AbortSignal.timeout(5000)
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
 await test('#parse', async t => {
   t.beforeEach(async t => {
     const mod = await import(binpath)
@@ -110,6 +121,9 @@ await test('internals', async t => {
 })
 
 await test('CLI completion generates zsh script', async t => {
+  if (!await hasNetwork())
+    return t.skip('network unavailable')
+
   const { code, stdout } = await new Promise(resolve => {
     const p = spawn(process.execPath, [binpath, 'completion'], {
       env: { ...process.env, NO_COLOR: '1' }
@@ -194,6 +208,9 @@ await test('CLI works when invoked via symlink', async t => {
 })
 
 await test('CLI list returns module names', async t => {
+  if (!await hasNetwork())
+    return t.skip('network unavailable')
+
   const { code, stdout } = await new Promise(resolve => {
     const p = spawn(process.execPath, [binpath, 'list'], {
       env: { ...process.env, NO_COLOR: '1' }
